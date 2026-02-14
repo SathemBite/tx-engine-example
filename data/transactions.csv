@@ -1,0 +1,4 @@
+id,description,amount,currency
+1,Coffee,2.50,USD
+2,Book,12.99,USD
+3,Refund,-2.50,USD
