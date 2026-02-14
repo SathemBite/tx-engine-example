@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Tx Engine Example",
+      "cargo": {
+        "args": ["build", "--bin", "tx-engine-example"],
+        "filter": {
+          "name": "tx-engine-example",
+          "kind": "bin"
+        }
+      },
+      "args": ["data/transactions.csv"],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
