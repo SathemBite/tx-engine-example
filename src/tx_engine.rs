@@ -33,7 +33,7 @@ impl ClientSnapshot {
     }
 }
 
-trait ClientTx {
+trait ClientOwned {
     fn client_id(&self) -> &ClientId;
 }
 
@@ -63,7 +63,7 @@ enum TransactionRecord {
     },
 }
 
-impl ClientTx for TransactionRecord {
+impl ClientOwned for TransactionRecord {
     fn client_id(&self) -> &ClientId {
         match self {
             TransactionRecord::Deposit { client, .. } => client,
