@@ -20,6 +20,17 @@ struct ClientData {
     frozen: bool,
 }
 
+impl ClientData {
+    fn init() -> Self {
+        ClientData {
+            balances: Balances::init(),
+            txs: HashMap::new(),
+            disputed_txs: HashMap::new(),
+            frozen: false,
+        }
+    }
+}
+
 pub struct ClientSnapshot {
     pub client_id: ClientId,
     pub available: Amount,
@@ -71,17 +82,6 @@ impl ClientOwned for TransactionRecord {
             TransactionRecord::Dispute { client, .. } => client,
             TransactionRecord::Resolve { client, .. } => client,
             TransactionRecord::Chargeback { client, .. } => client,
-        }
-    }
-}
-
-impl ClientData {
-    fn init() -> Self {
-        ClientData {
-            balances: Balances::init(),
-            txs: HashMap::new(),
-            disputed_txs: HashMap::new(),
-            frozen: false,
         }
     }
 }
@@ -146,135 +146,159 @@ impl TxEngine {
                 client,
                 tx_id: _,
                 amount,
-            } => {
-                let user = self.users.entry(*client).or_insert_with(ClientData::init);
-                user.balances.available += *amount;
-            }
+            } => self.handle_deposit(*client, *amount)?,
 
             TransactionRecord::Withdrawal {
                 client,
                 tx_id: _,
                 amount,
-            } => {
-                let user = self.users.entry(*client).or_insert_with(ClientData::init);
-                if (user.balances.available - *amount) < Amount::ZERO {
-                    return Err(AppError::TxProcessingNonCritical(format!(
-                        "Insufficient funds for user {}: available {}, attempted withdrawal {}",
-                        client, user.balances.available, amount
-                    )));
-                }
-                user.balances.available -= *amount;
-            }
+            } => self.handle_withdrawal(*client, *amount)?,
 
             TransactionRecord::Dispute {
                 client,
                 disputed_tx_id,
-            } => {
-                let user = match self.users.get_mut(client) {
-                    Some(user) => user,
-                    None => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Cannot dispute transaction {} for user {}, client not found",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                if user.disputed_txs.contains_key(disputed_tx_id) {
-                    return Err(AppError::TxProcessingNonCritical(format!(
-                        "Transaction {} for user {} is already disputed",
-                        disputed_tx_id, client
-                    )));
-                }
-
-                let diputed_tx = match user.txs.get(disputed_tx_id) {
-                    Some(tx) => tx,
-                    None => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Disputed transaction {} not found for user {}",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                let balance_diff = match diputed_tx {
-                    TransactionRecord::Deposit { amount, .. } => *amount,
-
-                    TransactionRecord::Withdrawal { .. }
-                    | TransactionRecord::Dispute { .. }
-                    | TransactionRecord::Resolve { .. }
-                    | TransactionRecord::Chargeback { .. } => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Cannot dispute transaction {} for user {}, not a deposit",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                user.balances.available -= balance_diff;
-                user.balances.held += balance_diff;
-                user.disputed_txs.insert(*disputed_tx_id, balance_diff);
-            }
+            } => self.handle_dispute(*client, *disputed_tx_id)?,
 
             TransactionRecord::Resolve {
                 client,
                 disputed_tx_id,
-            } => {
-                let user = match self.users.get_mut(client) {
-                    Some(user) => user,
-                    None => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Cannot resolve disputed transaction {} for user {}, client not found",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                let disputed_tx_diff = match user.disputed_txs.get(disputed_tx_id) {
-                    Some(amount) => amount,
-                    None => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Cannot resolve disputed transaction {} for user {}, not in dispute",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                user.balances.available += *disputed_tx_diff;
-                user.balances.held -= *disputed_tx_diff;
-                user.disputed_txs.remove(disputed_tx_id);
-            }
+            } => self.handle_resolve(*client, *disputed_tx_id)?,
 
             TransactionRecord::Chargeback {
                 client,
                 disputed_tx_id,
-            } => {
-                let user = match self.users.get_mut(client) {
-                    Some(user) => user,
-                    None => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Cannot chargeback disputed transaction {} for user {}, client not found",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                let disputed_tx_diff = match user.disputed_txs.get(disputed_tx_id) {
-                    Some(amount) => amount,
-                    None => {
-                        return Err(AppError::TxProcessingNonCritical(format!(
-                            "Cannot chargeback disputed transaction {} for user {}, not in dispute",
-                            disputed_tx_id, client
-                        )));
-                    }
-                };
-
-                user.balances.held -= *disputed_tx_diff;
-                user.disputed_txs.remove(disputed_tx_id);
-                user.frozen = true;
-            }
+            } => self.handle_chargeback(*client, *disputed_tx_id)?,
         }
 
+        Ok(())
+    }
+
+    fn handle_deposit(&mut self, client: ClientId, amount: Amount) -> Result<(), AppError> {
+        let user = self.users.entry(client).or_insert_with(ClientData::init);
+        user.balances.available += amount;
+        Ok(())
+    }
+
+    fn handle_withdrawal(&mut self, client: ClientId, amount: Amount) -> Result<(), AppError> {
+        let available = self
+            .users
+            .get(&client)
+            .map_or(Amount::ZERO, |user| user.balances.available);
+        if (available - amount) < Amount::ZERO {
+            return Err(AppError::TxProcessingNonCritical(format!(
+                "Insufficient funds for user {}: available {}, attempted withdrawal {}",
+                client, available, amount
+            )));
+        }
+
+        let user = self.users.entry(client).or_insert_with(ClientData::init);
+        user.balances.available -= amount;
+        Ok(())
+    }
+
+    fn handle_dispute(&mut self, client: ClientId, disputed_tx_id: TxID) -> Result<(), AppError> {
+        let user = match self.users.get_mut(&client) {
+            Some(user) => user,
+            None => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Cannot dispute transaction {} for user {}, client not found",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        if user.disputed_txs.contains_key(&disputed_tx_id) {
+            return Err(AppError::TxProcessingNonCritical(format!(
+                "Transaction {} for user {} is already disputed",
+                disputed_tx_id, client
+            )));
+        }
+
+        let disputed_tx = match user.txs.get(&disputed_tx_id) {
+            Some(tx) => tx,
+            None => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Disputed transaction {} not found for user {}",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        let balance_diff = match disputed_tx {
+            TransactionRecord::Deposit { amount, .. } => *amount,
+
+            TransactionRecord::Withdrawal { .. }
+            | TransactionRecord::Dispute { .. }
+            | TransactionRecord::Resolve { .. }
+            | TransactionRecord::Chargeback { .. } => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Cannot dispute transaction {} for user {}, not a deposit",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        user.balances.available -= balance_diff;
+        user.balances.held += balance_diff;
+        user.disputed_txs.insert(disputed_tx_id, balance_diff);
+        Ok(())
+    }
+
+    fn handle_resolve(&mut self, client: ClientId, disputed_tx_id: TxID) -> Result<(), AppError> {
+        let user = match self.users.get_mut(&client) {
+            Some(user) => user,
+            None => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Cannot resolve disputed transaction {} for user {}, client not found",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        let disputed_tx_diff = match user.disputed_txs.get(&disputed_tx_id) {
+            Some(amount) => amount,
+            None => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Cannot resolve disputed transaction {} for user {}, not in dispute",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        user.balances.available += *disputed_tx_diff;
+        user.balances.held -= *disputed_tx_diff;
+        user.disputed_txs.remove(&disputed_tx_id);
+        Ok(())
+    }
+
+    fn handle_chargeback(
+        &mut self,
+        client: ClientId,
+        disputed_tx_id: TxID,
+    ) -> Result<(), AppError> {
+        let user = match self.users.get_mut(&client) {
+            Some(user) => user,
+            None => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Cannot chargeback disputed transaction {} for user {}, client not found",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        let disputed_tx_diff = match user.disputed_txs.get(&disputed_tx_id) {
+            Some(amount) => amount,
+            None => {
+                return Err(AppError::TxProcessingNonCritical(format!(
+                    "Cannot chargeback disputed transaction {} for user {}, not in dispute",
+                    disputed_tx_id, client
+                )));
+            }
+        };
+
+        user.balances.held -= *disputed_tx_diff;
+        user.disputed_txs.remove(&disputed_tx_id);
+        user.frozen = true;
         Ok(())
     }
 
@@ -430,6 +454,45 @@ mod tests {
         assert_eq!(snapshot.available, Amount::new(dec!(1.0)));
         assert_eq!(snapshot.held, Amount::ZERO);
         assert_eq!(snapshot.total(), Amount::new(dec!(1.0)));
+    }
+
+    #[test]
+    fn withdrawal_for_unknown_client_with_insufficient_funds_does_not_create_state() {
+        let mut engine = TxEngine::new();
+        let result = engine.process_transaction(&make_tx(
+            TransactionType::Withdrawal,
+            42,
+            1,
+            Some(Amount::new(dec!(1.0))),
+        ));
+
+        assert!(matches!(result, Err(AppError::TxProcessingNonCritical(_))));
+        assert!(engine.clients_snapshot().is_empty());
+    }
+
+    #[test]
+    fn snapshot_does_not_include_client_with_only_invalid_withdrawal() {
+        let mut engine = TxEngine::new();
+        engine
+            .process_transaction(&make_tx(
+                TransactionType::Deposit,
+                1,
+                1,
+                Some(Amount::new(dec!(3.0))),
+            ))
+            .unwrap();
+
+        let result = engine.process_transaction(&make_tx(
+            TransactionType::Withdrawal,
+            42,
+            2,
+            Some(Amount::new(dec!(1.0))),
+        ));
+        assert!(matches!(result, Err(AppError::TxProcessingNonCritical(_))));
+
+        let snapshots = engine.clients_snapshot();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].client_id, ClientId(1));
     }
 
     #[test]

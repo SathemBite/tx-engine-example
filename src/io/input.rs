@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 
 use crate::domain::types::{Amount, ClientId, TransactionType, TxID};
 
@@ -17,6 +17,7 @@ pub struct Transaction {
 }
 
 pub type TransactionRecords = csv::DeserializeRecordsIntoIter<BufReader<File>, Transaction>;
+pub type TransactionRecordsFromReader<R> = csv::DeserializeRecordsIntoIter<R, Transaction>;
 
 #[derive(Debug)]
 pub enum ParseTransactionsError {
@@ -54,33 +55,26 @@ impl From<csv::Error> for ParseTransactionsError {
     }
 }
 
-pub fn parse_transactions(input_path: &str) -> Result<TransactionRecords, ParseTransactionsError> {
-    let file = File::open(input_path)?;
-    let reader = BufReader::new(file);
+pub fn parse_transactions_from_reader<R: Read>(reader: R) -> TransactionRecordsFromReader<R> {
     let csv_reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .from_reader(reader);
 
-    Ok(csv_reader.into_deserialize::<Transaction>())
+    csv_reader.into_deserialize::<Transaction>()
+}
+
+pub fn parse_transactions(input_path: &str) -> Result<TransactionRecords, ParseTransactionsError> {
+    let file = File::open(input_path)?;
+    let reader = BufReader::new(file);
+
+    Ok(parse_transactions_from_reader(reader))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn write_temp_csv(test_name: &str, content: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("input_parser_{test_name}_{nanos}.csv"));
-        fs::write(&path, content).expect("must write temp csv");
-        path
-    }
+    use std::io::Cursor;
 
     #[test]
     fn parses_row_with_whitespace_and_amount() {
@@ -88,15 +82,13 @@ mod tests {
 type, client, tx, amount
 deposit, 1, 10, 1.2345
 ";
-        let path = write_temp_csv("whitespace", csv);
-        let path_str = path.to_string_lossy().into_owned();
+        let cursor = Cursor::new(csv.as_bytes());
 
-        let mut iter = parse_transactions(&path_str).expect("must create csv iterator");
+        let mut iter = parse_transactions_from_reader(cursor);
         let tx = iter
             .next()
             .expect("one row is expected")
             .expect("row must parse");
-        fs::remove_file(path).expect("must remove temp file");
 
         assert_eq!(tx.op_type, TransactionType::Deposit);
         assert_eq!(tx.client, ClientId(1));
@@ -110,15 +102,13 @@ deposit, 1, 10, 1.2345
 type,client,tx,amount
 dispute,5,42,
 ";
-        let path = write_temp_csv("dispute_none_amount", csv);
-        let path_str = path.to_string_lossy().into_owned();
+        let cursor = Cursor::new(csv.as_bytes());
 
-        let mut iter = parse_transactions(&path_str).expect("must create csv iterator");
+        let mut iter = parse_transactions_from_reader(cursor);
         let tx = iter
             .next()
             .expect("one row is expected")
             .expect("row must parse");
-        fs::remove_file(path).expect("must remove temp file");
 
         assert_eq!(tx.op_type, TransactionType::Dispute);
         assert_eq!(tx.client, ClientId(5));
@@ -147,12 +137,10 @@ dispute,5,42,
 type,client,tx,amount
 deposit,abc,1,1.0
 ";
-        let path = write_temp_csv("invalid_record", csv);
-        let path_str = path.to_string_lossy().into_owned();
+        let cursor = Cursor::new(csv.as_bytes());
 
-        let mut iter = parse_transactions(&path_str).expect("must create csv iterator");
+        let mut iter = parse_transactions_from_reader(cursor);
         let row_result = iter.next().expect("one row is expected");
-        fs::remove_file(path).expect("must remove temp file");
 
         assert!(row_result.is_err());
     }

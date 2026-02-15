@@ -5,7 +5,7 @@ Short version of what this implementation assumes:
 1. One client = one asset account.
 2. `client` is `u16`, `tx` is `u32`.
 3. `tx` is treated as globally unique (duplicate `tx` is skipped).
-4. New client records are created only on `deposit`/`withdrawal`.
+4. New client records are created on `deposit` and on successful `withdrawal`.
 5. `dispute/resolve/chargeback` for an unknown client are skipped.
 6. `dispute` is allowed only for `deposit`.
 7. `dispute` may make `available` negative; we follow the spec math literally.
